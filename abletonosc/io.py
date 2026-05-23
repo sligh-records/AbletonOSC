@@ -13,20 +13,35 @@ Constraints:
   (sample rate, bit depth, format, range). The export tool reuses them;
   set them once manually before the first run.
 
+Overwrite handling
+------------------
+
+The macOS Save sheet shows a "Replace?" alert when the destination already
+exists, and Live shows extra confirmation alerts for some Save Live Set As
+flows. To keep the AppleScript chain deterministic we **pre-delete** the
+destination from disk before firing keystrokes. Both shapes are removed:
+
+- the bare path (``/foo/bar.als``)
+- the wrapped Project folder (``/foo/bar Project/``) that Live creates when
+  "Always wrap projects" is enabled.
+
 OSC addresses:
 
 - ``/live/io/save_set_as path`` — saves the current set to ``path``.
 - ``/live/io/export_audio path`` — exports current set to ``path`` using
   Live's current Export-dialog settings.
+- ``/live/io/load_set path`` — opens an existing ``.als`` at ``path``.
 
-Both handlers spawn ``osascript`` via :func:`subprocess.Popen` so they return
-immediately; the AppleScript runs in parallel and types into Live's UI.
-The caller polls the destination path on disk to know when each operation
-is finished.
+All three handlers spawn ``osascript`` via :func:`subprocess.Popen` so they
+return immediately; the AppleScript runs in parallel and types into Live's
+UI. The caller polls the destination path on disk to know when each
+operation is finished.
 """
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
 from typing import Tuple
 
@@ -35,15 +50,75 @@ from .handler import AbletonOSCHandler
 logger = logging.getLogger("abletonosc")
 
 
+def _pre_clean_destination(path: str) -> None:
+    """Delete the destination so the Save sheet does not prompt to replace.
+
+    Removes both the literal target and the ``<basename> Project/`` wrapper
+    folder Live creates when *Always wrap projects* is enabled.
+    """
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            logger.info("pre-clean: removed file %s", path)
+    except OSError as exc:
+        logger.warning("pre-clean: could not remove %s: %s", path, exc)
+
+    parent = os.path.dirname(path)
+    stem, _ = os.path.splitext(os.path.basename(path))
+    wrapped_dir = os.path.join(parent, f"{stem} Project")
+    try:
+        if os.path.isdir(wrapped_dir):
+            shutil.rmtree(wrapped_dir, ignore_errors=True)
+            logger.info("pre-clean: removed wrapper %s", wrapped_dir)
+    except OSError as exc:
+        logger.warning("pre-clean: could not remove %s: %s", wrapped_dir, exc)
+
+
 # AppleScript driving File > Save Live Set As… and typing the destination
 # path through the standard "Go to folder" sheet (Cmd+Shift+G).
 _SAVE_SET_AS_APPLESCRIPT = """\
 on run argv
     set targetPath to item 1 of argv
     tell application "Live" to activate
+    delay 1.0
+    tell application "System Events"
+        tell process "Live"
+            set frontmost to true
+            delay 0.3
+            -- Click File > Save Live Set As… by menu name (more reliable than keystrokes)
+            try
+                click menu item "Save Live Set As…" of menu "File" of menu bar 1
+            on error
+                -- Fallback: use keystroke
+                keystroke "s" using {command down, shift down}
+            end try
+        end tell
+        delay 1.5
+        keystroke "g" using {command down, shift down}
+        delay 1.0
+        keystroke targetPath
+        delay 0.5
+        keystroke return
+        delay 1.0
+        keystroke return
+        delay 0.5
+        keystroke return
+    end tell
+end run
+"""
+
+
+# AppleScript driving File > Open Recent / File > Open… to load an .als by
+# absolute path. Cmd+O opens the file picker; Cmd+Shift+G accepts a typed
+# absolute path; the second Return accepts any "Save changes?" sheet that
+# Live throws up for the current set.
+_LOAD_SET_APPLESCRIPT = """\
+on run argv
+    set targetPath to item 1 of argv
+    tell application "Live" to activate
     delay 0.3
     tell application "System Events"
-        keystroke "s" using {command down, shift down}
+        keystroke "o" using {command down}
         delay 0.7
         keystroke "g" using {command down, shift down}
         delay 0.4
@@ -97,6 +172,7 @@ class IOHandler(AbletonOSCHandler):
                 logger.warning(msg)
                 return ("error", msg)
             path = str(params[0])
+            _pre_clean_destination(path)
             try:
                 proc = subprocess.Popen(
                     ["osascript", "-e", _SAVE_SET_AS_APPLESCRIPT, path],
@@ -115,6 +191,14 @@ class IOHandler(AbletonOSCHandler):
                 logger.warning(msg)
                 return ("error", msg)
             path = str(params[0])
+            # Pre-delete so the export sheet's "Replace?" prompt doesn't
+            # appear. Export does not wrap, so just the bare file.
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    logger.info("pre-clean: removed file %s", path)
+            except OSError as exc:
+                logger.warning("pre-clean: could not remove %s: %s", path, exc)
             try:
                 proc = subprocess.Popen(
                     ["osascript", "-e", _EXPORT_AUDIO_APPLESCRIPT, path],
@@ -127,5 +211,24 @@ class IOHandler(AbletonOSCHandler):
             logger.info("export_audio: pid=%d path=%s", proc.pid, path)
             return ("ok", path)
 
+        def load_set(params: Tuple) -> Tuple:
+            if not params:
+                msg = "load_set: missing path argument"
+                logger.warning(msg)
+                return ("error", msg)
+            path = str(params[0])
+            try:
+                proc = subprocess.Popen(
+                    ["osascript", "-e", _LOAD_SET_APPLESCRIPT, path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            except OSError as exc:
+                logger.error("load_set: spawn failed: %s", exc)
+                return ("error", str(exc))
+            logger.info("load_set: pid=%d path=%s", proc.pid, path)
+            return ("ok", path)
+
         self.osc_server.add_handler("/live/io/save_set_as", save_set_as)
         self.osc_server.add_handler("/live/io/export_audio", export_audio)
+        self.osc_server.add_handler("/live/io/load_set", load_set)
