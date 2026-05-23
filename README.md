@@ -1,5 +1,9 @@
 # AbletonOSC: Control Ableton Live with OSC
 
+> **sligh-records fork.** Adds `/live/io/save_set_as`, `/live/io/load_set`, and `/live/io/export_audio` endpoints driven through macOS GUI scripting (`osascript`). Tracked under `feat/io-save-export`. Sync upstream via `git fetch upstream && git rebase upstream/master`.
+>
+> Forked from [ideoforms/AbletonOSC](https://github.com/ideoforms/AbletonOSC).
+
 [![stability-beta](https://img.shields.io/badge/stability-beta-33bbff.svg)](https://github.com/mkenney/software-guides/blob/master/STABILITY-BADGES.md#beta)
 
 AbletonOSC is a MIDI remote script that provides an [Open Sound Control (OSC)](https://ccrma.stanford.edu/groups/osc/) interface to
@@ -30,6 +34,18 @@ Activity logs will be output to a `logs` subdirectory. Logging granularity can b
 
 AbletonOSC listens for OSC messages on port **11000**, and sends replies on port **11001**. Replies will be sent to the
 same IP as the originating message. When querying properties, OSC wildcard patterns can be used; for example, `/live/clip/get/* 0 0` will query all the properties of track 0, clip 0.
+
+## IO API (sligh-records fork)
+
+These endpoints drive Live's File menu through macOS GUI scripting (`osascript`). They are macOS-only and require Live's app bundle to have Accessibility permission (System Settings → Privacy & Security → Accessibility).
+
+| Address                       | Query params | Response params | Description                                                                              |
+|:------------------------------|:-------------|:----------------|:-----------------------------------------------------------------------------------------|
+| /live/io/save_set_as          | path         | "ok", path      | Save the current Live set to `path`. Pre-deletes the destination (file + Project wrapper) so no Replace? prompt appears. Live's Save Live Set As always writes a `<basename> Project/` wrapper folder; the MCP-side handler unwraps post-save. |
+| /live/io/load_set             | path         | "ok", path      | Open the `.als` at `path`. Closes the current set first (the script accepts any "Save changes?" sheet automatically — save explicitly first if you want to control that). |
+| /live/io/export_audio         | path         | "ok", path      | Render audio using Live's current Export-dialog settings (sample rate, bit depth, format, length). Pre-deletes any existing file at `path` so no Replace? prompt appears. Real-time render. |
+
+All three handlers spawn `osascript` and return immediately; the AppleScript runs in parallel and types into Live's UI. Callers (e.g. the [`ableton-live` MCP](https://github.com/sligh-records/studio/tree/main/mcps/ableton-live)) poll the destination on disk to know when the operation is finished.
 
 ## Application API
 
